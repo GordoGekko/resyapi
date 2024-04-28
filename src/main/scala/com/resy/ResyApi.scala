@@ -1,17 +1,16 @@
 package com.resy
 
 import akka.actor.ActorSystem
-import com.resy.ResyApi.{sendGetRequest, sendPostRequest}
 import org.apache.logging.log4j.scala.Logging
 import play.api.libs.ws.WSBodyWritables.writeableOf_String
 import play.api.libs.ws.ahc.AhcWSClient
+import play.api.libs.json.Json
 
 import java.net.URLEncoder
 import scala.concurrent.Future
 
-// Resy API docs can be found here http://subzerocbd.info/
 class ResyApi(resyToken: ResyKeys) {
-
+  
   /** Find available reservations
     * @param date
     *   Date of reservation to search in YYYY-MM-DD format
@@ -23,18 +22,17 @@ class ResyApi(resyToken: ResyKeys) {
     *   JSON object of available reservation times and seating types for that day
     */
   def getReservations(date: String, partySize: Int, venueId: Int): Future[String] = {
-    val findResQueryParams = Map(
+    val queryParams = Map(
       "lat"        -> "0",
       "long"       -> "0",
       "day"        -> date,
       "party_size" -> partySize.toString,
       "venue_id"   -> venueId.toString
     )
-
-    sendGetRequest(resyToken, "api.resy.com/4/find", findResQueryParams)
+    sendGetRequest(resyToken, "api.resy.com/4/find", queryParams)
   }
 
-  /** Get details of the reservation
+  /** Get details of the reservation using POST and send data as JSON
     * @param configId
     *   Unique identifier for the reservation
     * @param date
@@ -45,87 +43,49 @@ class ResyApi(resyToken: ResyKeys) {
     *   JSON object with the details about the reservation
     */
   def getReservationDetails(configId: String, date: String, partySize: Int): Future[String] = {
-    val findResQueryParams =
-      Map(
-        "config_id"  -> configId,
-        "day"        -> date,
-        "party_size" -> partySize.toString
-      )
-
-    sendGetRequest(resyToken, "api.resy.com/3/details", findResQueryParams)
+    val detailData = Json.obj(
+      "commit"     -> 0,
+      "config_id"  -> configId,
+      "day"        -> date,
+      "party_size" -> partySize
+    ).toString()
+    sendPostRequest(resyToken, "api.resy.com/3/details", detailData, "application/json")
   }
 
-  /** Book the reservation
-    * @param paymentMethodId
-    *   Unique identifier of the payment id in case of a late cancellation fee
-    * @param bookToken
-    *   Unique identifier of the reservation in question
+  /** Book the reservation using JSON payload
+    * @param data
+    *   JSON formatted string containing booking details
+    * @param contentType
+    *   Content type of the request (default to application/json)
     * @return
     *   JSON object of the unique identifier of the confirmed booking
     */
-  def postReservation(paymentMethodId: Int, bookToken: String): Future[String] = {
-    val bookResQueryParams = Map(
-      "book_token"            -> bookToken,
-      "struct_payment_method" -> s"""{"id":$paymentMethodId}"""
-    )
-
-    sendPostRequest(resyToken, "api.resy.com/3/book", bookResQueryParams)
+  def postReservation(data: String, contentType: String = "application/json"): Future[String] = {
+    sendPostRequest(resyToken, "api.resy.com/3/book", data, contentType)
   }
 }
 
 object ResyApi extends Logging {
   implicit private val system: ActorSystem = ActorSystem()
-  private val ws                           = AhcWSClient()
+  private val ws = AhcWSClient()
 
-  private def sendGetRequest(
-    resyKeys: ResyKeys,
-    baseUrl: String,
-    queryParams: Map[String, String]
-  ): Future[String] = {
-    val url =
-      s"https://$baseUrl?${stringifyQueryParams(queryParams)}"
-
-    logger.debug(s"URL Request: $url")
-
-    ws.url(url)
-      .withHttpHeaders(createHeaders(resyKeys): _*)
-      .get
-      .map(_.body)(system.dispatcher)
+  private def sendGetRequest(resyKeys: ResyKeys, baseUrl: String, queryParams: Map[String, String]): Future[String] = {
+    val url = s"https://$baseUrl?${stringifyQueryParams(queryParams)}"
+    logger.debug(s"Executing GET request: $url")
+    ws.url(url).withHttpHeaders(createHeaders(resyKeys): _*).get.map(_.body)(system.dispatcher)
   }
 
-  private def sendPostRequest(
-    resyKeys: ResyKeys,
-    baseUrl: String,
-    queryParams: Map[String, String]
-  ): Future[String] = {
-    val url  = s"https://$baseUrl"
-    val post = stringifyQueryParams(queryParams)
-
-    logger.debug(s"URL Request: $url")
-    logger.debug(s"Post Params: $post")
-
-    ws.url(url)
-      .withHttpHeaders(
-        createHeaders(resyKeys) ++ Seq(
-          "Content-Type" -> "application/x-www-form-urlencoded",
-          "Origin"       -> "https://widgets.resy.com",
-          "Referer"      -> "https://widgets.resy.com/"
-        ): _*
-      )
-      .post(post)
-      .map(_.body)(system.dispatcher)
+  private def sendPostRequest(resyKeys: ResyKeys, baseUrl: String, data: String, contentType: String): Future[String] = {
+    val url = s"https://$baseUrl"
+    logger.debug(s"Executing POST request to URL: $url with data: $data")
+    ws.url(url).withHttpHeaders(createHeaders(resyKeys) ++ Seq("Content-Type" -> contentType): _*).post(data).map(_.body)(system.dispatcher)
   }
 
   private[this] def createHeaders(resyKeys: ResyKeys): Seq[(String, String)] = {
-    Seq(
-      "Authorization"     -> s"""ResyAPI api_key="${resyKeys.apiKey}"""",
-      "x-resy-auth-token" -> resyKeys.authToken
-    )
+    Seq("Authorization" -> s"ResyAPI api_key=\"${resyKeys.apiKey}\"", "x-resy-auth-token" -> resyKeys.authToken)
   }
 
   private[this] def stringifyQueryParams(queryParams: Map[String, String]): String = {
-    queryParams.foldLeft("") { case (acc, (key, value)) =>
-      acc + s"$key=${URLEncoder.encode(value, "UTF-8")}&"
-    }
+    queryParams.foldLeft("") { (acc, (key, value)) => acc + s"$key=${URLEncoder.encode(value, "UTF-8")}&" }.dropRight(1)
   }
 }
